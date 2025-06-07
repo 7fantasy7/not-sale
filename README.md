@@ -1,6 +1,8 @@
 # NOT Back Contest - Flash Sale Service
 
-```text
+For https://contest.notco.in/dev-backend
+
+```text IsntThatAPerfectEasterEgg
             ##                            ( )_
            #||#            ___      _ //  |  _)   ___    _ //  (_)   ___
           # || #         /  _  \  / _//\  | |   / ___) / _//\  | | /  _  \
@@ -30,6 +32,22 @@ with a two-step purchase process to ensure reliability and prevent overselling.
 - Limits each user to a maximum of 10 items per sale
 
 ## Technical details
+
+### Assumptions (beyond the brief)
+
+- Even next sale is started, the previous sale is still active until there are items available.
+- User can checkout more then 10 times on the same sale, but only 10 items can be purchased. <br>Imaging going back or
+  refreshing the page scenario.
+- The service doesn't contain a state for performance "hacks", assuming it can be run in clustered mode.
+- 10,000 items are not that big of a deal, so preferring strong consistency over performance.
+- Not overcomplicating the code with unnecessary abstractions, keeping it simple and readable.
+
+### Libraries and Technologies
+
+- [Go-chi router](https://github.com/go-chi/chi/v5) - A lightweight, idiomatic and composable router for building Go
+  HTTP services.
+- [Go-redis](https://github.com/redis/go-redis) — Redis client for Go
+- [Pq](https://github.com/lib/pq) — PostgreSQL driver and toolkit for Go
 
 TODO
 
