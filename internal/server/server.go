@@ -123,11 +123,23 @@ func (s *Server) generateItems(saleID int) error {
 	categories := []string{
 		"Electronics", "Clothing", "Home", "Kitchen", "Sports",
 		"Toys", "Books", "Beauty", "Jewelry", "Automotive",
+		"Furniture", "Garden", "Outdoor", "Fitness", "Baby",
+		"Pet Supplies", "Office", "Art", "Music", "Gaming",
+		"Travel", "Health", "Food", "Stationery", "Accessories",
+		"Footwear", "Watches", "Appliances", "DIY", "Photography",
+		"Camping", "Crafts", "Party", "Seasonal", "Tech Gadgets",
+		"Smartphones", "Computers", "Audio", "Lighting", "Bedding",
 	}
 
 	adjectives := []string{
 		"Premium", "Deluxe", "Essential", "Classic", "Modern",
 		"Vintage", "Luxury", "Budget", "Professional", "Compact",
+		"Elegant", "Stylish", "Durable", "Portable", "Advanced",
+		"Smart", "Eco-Friendly", "Handcrafted", "Innovative", "Sleek",
+		"Ergonomic", "Customizable", "Exclusive", "Practical", "Trendy",
+		"Minimalist", "Colorful", "Multifunctional", "Lightweight", "Waterproof",
+		"Wireless", "Organic", "Adjustable", "Foldable", "High-Performance",
+		"Limited Edition", "Rechargeable", "Retro", "Signature", "Ultra-Thin",
 	}
 
 	ctx := context.Background()
