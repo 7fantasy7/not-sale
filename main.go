@@ -45,7 +45,15 @@ type App struct {
 }
 
 func NewApp() (*App, error) {
-	connStr := "postgres://postgres:postgres@localhost:5432/app?sslmode=disable"
+	pgUser := getEnv("PG_USER", "postgres")
+	pgPassword := getEnv("PG_PASSWORD", "postgres")
+	pgHost := getEnv("PG_HOST", "localhost")
+	pgPort := getEnv("PG_PORT", "5432")
+	pgDB := getEnv("PG_DB", "app")
+
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		pgUser, pgPassword, pgHost, pgPort, pgDB)
+
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -55,8 +63,11 @@ func NewApp() (*App, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	redisHost := getEnv("REDIS_HOST", "localhost")
+	redisPort := getEnv("REDIS_PORT", "6379")
+
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
+		Addr:     fmt.Sprintf("%s:%s", redisHost, redisPort),
 		Password: "",
 		DB:       0,
 	})
@@ -619,7 +630,7 @@ func (a *App) startNewSale() error {
 
 func (a *App) Run() error {
 	server := &http.Server{
-		Addr:    ":8080",
+		Addr:    ":" + getEnv("PORT", "8080"),
 		Handler: a.router,
 	}
 
@@ -685,6 +696,14 @@ func (a *App) Close() error {
 	}
 
 	return nil
+}
+
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }
 
 func main() {

@@ -12,7 +12,7 @@
 # If start_item_id is not provided, it defaults to 1
 
 # Set the starting item ID (default to 1 if not provided)
-START_ITEM_ID=${1:-100}
+START_ITEM_ID=${1:-1}
 echo "Using starting item ID: $START_ITEM_ID"
 
 # Set the user ID
