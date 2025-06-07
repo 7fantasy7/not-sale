@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:17.5
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - not_sale_pg:/var/lib/postgresql/data:Z
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -d notsale -U postgres" ]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - not_sale_redis:/data
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped
+
+volumes:
+  not_sale_pg:
+    driver: local
+  not_sale_redis:
+    driver: local

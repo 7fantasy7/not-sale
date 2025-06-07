@@ -1,0 +1,10 @@
+build/
+
+
+# IDEA specifics
+.idea
+*.iml
+
+### macOS ###
+# General
+.DS_Store
