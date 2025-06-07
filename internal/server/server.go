@@ -30,7 +30,7 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config) (*Server, error) {
-	db, err := database.NewDatabase(cfg.PostgresURL)
+	db, err := database.NewDatabase(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
@@ -39,14 +39,22 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	rdb, err := redis.NewRedisClient(cfg.RedisAddr)
+	rdb, err := redis.NewRedisClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Redis client: %w", err)
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+
+	if cfg.EnableRequestLogger {
+		r.Use(middleware.Logger)
+	}
+
 	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(cfg.RequestTimeout))
+	r.Use(middleware.ThrottleBacklog(cfg.MaxConcurrentReqs, 1000, time.Second*60))
+	r.Use(middleware.Heartbeat("/health"))
+	r.Use(middleware.RequestID)
 
 	handler := handlers.NewHandler(db, rdb)
 
@@ -60,7 +68,10 @@ func NewServer(cfg *config.Config) (*Server, error) {
 
 	server.setupRoutes()
 
-	if err := server.populateItemsCache(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.populateItemsCache(ctx); err != nil {
 		log.Printf("Warning: failed to populate items cache: %v", err)
 	}
 
@@ -72,14 +83,28 @@ func (s *Server) setupRoutes() {
 	s.router.Post("/purchase", s.handler.HandlePurchase)
 }
 
-func (s *Server) populateItemsCache() error {
-	items, err := s.db.GetAllItems()
+func (s *Server) populateItemsCache(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var items []struct {
+		ID     int
+		SaleID int
+	}
+
+	err := s.db.ExecuteWithRetry(ctx, func() error {
+		var err error
+		items, err = s.db.GetAllItems()
+		return err
+	})
+
 	if err != nil {
 		return fmt.Errorf("failed to get items: %w", err)
 	}
 
-	ctx := context.Background()
-	return s.rdb.PopulateItemsCache(ctx, items, time.Hour)
+	return s.rdb.ExecuteWithRetry(ctx, func(ctx context.Context) error {
+		return s.rdb.PopulateItemsCache(ctx, items, time.Hour)
+	})
 }
 
 func (s *Server) startNewSale() error {
@@ -199,40 +224,84 @@ func (s *Server) startHourlySales() {
 
 func (s *Server) Run() error {
 	server := &http.Server{
-		Addr:    ":" + s.config.Port,
-		Handler: s.router,
+		Addr:         ":" + s.config.Port,
+		Handler:      s.router,
+		ReadTimeout:  s.config.ServerReadTimeout,
+		WriteTimeout: s.config.ServerWriteTimeout,
+		IdleTimeout:  s.config.ServerIdleTimeout,
 	}
 
-	if err := s.startNewSale(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := s.startNewSaleWithRetry(ctx); err != nil {
 		log.Printf("Warning: failed to start initial sale: %v", err)
 	}
 
 	go s.startHourlySales()
 
 	serverErrors := make(chan error, 1)
+
 	go func() {
 		log.Printf("Server listening on %s", server.Addr)
 		serverErrors <- server.ListenAndServe()
 	}()
 
 	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
 	select {
 	case err := <-serverErrors:
 		return fmt.Errorf("server error: %w", err)
-	case <-shutdown:
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	case sig := <-shutdown:
+		log.Printf("Received signal %v, initiating graceful shutdown...", sig)
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.config.ServerShutdownTimeout)
 		defer cancel()
+
 		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Graceful shutdown failed: %v, forcing immediate shutdown", err)
 			if err := server.Close(); err != nil {
-				return fmt.Errorf("could not stop server gracefully: %w", err)
+				return fmt.Errorf("could not stop server gracefully or immediately: %w", err)
 			}
 		}
+
+		log.Println("Server shutdown complete")
 	}
 
 	return nil
+}
+
+func (s *Server) startNewSaleWithRetry(ctx context.Context) error {
+	var lastErr error
+	maxRetries := 3
+
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := s.startNewSale()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("Failed to start new sale, retrying (%d/%d): %v", i+1, maxRetries, err)
+
+		retryTime := time.Duration(1<<uint(i)) * 500 * time.Millisecond
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryTime):
+			// Continue
+		}
+	}
+
+	return fmt.Errorf("failed to start new sale after %d retries: %w", maxRetries, lastErr)
 }
 
 func (s *Server) Close() error {

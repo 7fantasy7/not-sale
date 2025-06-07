@@ -1,5 +1,5 @@
 ### Checkout an item
-POST http://localhost:8080/checkout?user_id=user123&id=1
+POST http://localhost:8080/checkout?user_id=user123&id=100
 
 ### Purchase an item (replace CODE with the code from the checkout response)
-POST http://localhost:8080/purchase?code=w6_sOn8ZaEDdlLIcRKImew==
+POST http://localhost:8080/purchase?code=_kn1vAfo5iaPveARMFeKQg==

@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
 
+	"not-sale-back/internal/config"
 	"not-sale-back/internal/models"
 )
 
@@ -16,17 +19,93 @@ type Database struct {
 	db *sql.DB
 }
 
-func NewDatabase(connStr string) (*Database, error) {
-	db, err := sql.Open("postgres", connStr)
+func NewDatabase(cfg *config.Config) (*Database, error) {
+	db, err := sql.Open("postgres", cfg.PostgresURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
+	db.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.DBConnMaxIdleTime)
+
+	maxRetries := 5
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		err := db.Ping()
+		if err == nil {
+			log.Println("Successfully connected to database")
+			return &Database{db: db}, nil
+		}
+		lastErr = err
+		retryTime := time.Duration(1<<uint(i)) * time.Second
+		log.Printf("Failed to ping database, retrying in %v: %v", retryTime, err)
+		time.Sleep(retryTime)
 	}
 
-	return &Database{db: db}, nil
+	return nil, fmt.Errorf("failed to ping database after %d retries: %w", maxRetries, lastErr)
+}
+
+func (d *Database) ExecuteWithRetry(ctx context.Context, operation func() error) error {
+	maxRetries := 3
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		if isTransientError(err) {
+			lastErr = err
+			retryTime := time.Duration(1<<uint(i)) * 100 * time.Millisecond
+			log.Printf("Transient database error, retrying in %v: %v", retryTime, err)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryTime):
+				// Continue
+			}
+			continue
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("operation failed after %d retries: %w", maxRetries, lastErr)
+}
+
+func isTransientError(err error) bool {
+	if err != nil {
+		errMsg := err.Error()
+
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return true
+		}
+		if errors.Is(err, sql.ErrConnDone) || errors.Is(err, sql.ErrTxDone) {
+			return true
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+
+		if strings.Contains(errMsg, "connection") {
+			return strings.Contains(errMsg, "reset") ||
+				strings.Contains(errMsg, "closed") ||
+				strings.Contains(errMsg, "broken") ||
+				strings.Contains(errMsg, "refused") ||
+				strings.Contains(errMsg, "timeout")
+		}
+	}
+	return false
 }
 
 func (d *Database) InitDB() error {

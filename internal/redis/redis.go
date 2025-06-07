@@ -2,30 +2,108 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"not-sale-back/internal/config"
 )
 
 type RedisClient struct {
 	client *redis.Client
 }
 
-func NewRedisClient(addr string) (*RedisClient, error) {
+func NewRedisClient(cfg *config.Config) (*RedisClient, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: "",
-		DB:       0,
+		Addr:         cfg.RedisAddr,
+		Password:     "",
+		DB:           0,
+		PoolSize:     cfg.RedisPoolSize,
+		MinIdleConns: cfg.RedisMinIdleConns,
+		MaxRetries:   cfg.RedisMaxRetries,
+		DialTimeout:  cfg.RedisDialTimeout,
+		ReadTimeout:  cfg.RedisReadTimeout,
+		WriteTimeout: cfg.RedisWriteTimeout,
+		PoolTimeout:  cfg.RedisPoolTimeout,
 	})
 
-	ctx := context.Background()
-	if _, err := client.Ping(ctx).Result(); err != nil {
-		return nil, fmt.Errorf("failed to ping Redis: %w", err)
+	maxRetries := 5
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, err := client.Ping(ctx).Result()
+		cancel()
+
+		if err == nil {
+			log.Println("Successfully connected to Redis")
+			return &RedisClient{client: client}, nil
+		}
+
+		lastErr = err
+		retryTime := time.Duration(1<<uint(i)) * time.Second
+		log.Printf("Failed to ping Redis, retrying in %v: %v", retryTime, err)
+		time.Sleep(retryTime)
 	}
 
-	return &RedisClient{client: client}, nil
+	return nil, fmt.Errorf("failed to ping Redis after %d retries: %w", maxRetries, lastErr)
+}
+
+func (r *RedisClient) ExecuteWithRetry(ctx context.Context, operation func(context.Context) error) error {
+	maxRetries := 3
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		err := operation(ctx)
+		if err == nil {
+			return nil
+		}
+
+		if isTransientRedisError(err) {
+			lastErr = err
+			retryTime := time.Duration(1<<uint(i)) * 100 * time.Millisecond
+			log.Printf("Transient Redis error, retrying in %v: %v", retryTime, err)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryTime):
+				// Continue
+			}
+			continue
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("redis operation failed after %d retries: %w", maxRetries, lastErr)
+}
+
+func isTransientRedisError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	errMsg := err.Error()
+	return errMsg == "redis: connection pool timeout" ||
+		errMsg == "redis: connection closed" ||
+		errMsg == "redis: client is closed" ||
+		errMsg == "i/o timeout" ||
+		errMsg == "connection refused" ||
+		errMsg == "connection reset by peer"
 }
 
 func (r *RedisClient) StoreItem(ctx context.Context, saleID, itemID int, expiration time.Duration) error {

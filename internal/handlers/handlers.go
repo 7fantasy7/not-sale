@@ -22,6 +22,7 @@ type DatabaseService interface {
 	GetUserTotalItems(ctx context.Context, userID string, saleID int) (int, error)
 	StoreCheckoutAttempt(ctx context.Context, userID string, itemID int, code string, saleID int, status string) error
 	GetDB() *sql.DB
+	ExecuteWithRetry(ctx context.Context, operation func() error) error
 }
 
 type RedisService interface {
@@ -30,6 +31,7 @@ type RedisService interface {
 	DeleteCode(ctx context.Context, code string) error
 	ItemExists(ctx context.Context, saleID, itemID int) (bool, error)
 	GetClient() *redis.Client
+	ExecuteWithRetry(ctx context.Context, operation func(context.Context) error) error
 }
 
 type Handler struct {
@@ -47,91 +49,111 @@ func NewHandler(db DatabaseService, redis RedisService) *Handler {
 func (h *Handler) HandleCheckout(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	itemIDStr := r.URL.Query().Get("id")
-	ctx := r.Context()
 
-	code, err := utils.GenerateUniqueCode()
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var code string
+	err := h.db.ExecuteWithRetry(ctx, func() error {
+		var err error
+		code, err = utils.GenerateUniqueCode()
+		return err
+	})
+
 	if err != nil {
 		http.Error(w, "Failed to generate code", http.StatusInternalServerError)
-		log.Printf("Failed to generate code: %v", err)
+		log.Printf("Failed to generate code after retries: %v", err)
 		return
 	}
 
 	if userID == "" || itemIDStr == "" {
-		if err := h.db.StoreCheckoutAttempt(ctx, userID, 0, code, 0, "error_missing_params"); err != nil {
-			log.Printf("Failed to store checkout attempt: %v", err)
-		}
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, 0, code, 0, "error_missing_params")
 		http.Error(w, "Missing user_id or id parameter", http.StatusBadRequest)
 		return
 	}
 
 	itemID, err := strconv.Atoi(itemIDStr)
 	if err != nil {
-		if err := h.db.StoreCheckoutAttempt(ctx, userID, 0, code, 0, "error_invalid_item_id"); err != nil {
-			log.Printf("Failed to store checkout attempt: %v", err)
-		}
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, 0, code, 0, "error_invalid_item_id")
 		http.Error(w, "Invalid item ID", http.StatusBadRequest)
 		return
 	}
 
-	db := h.db.GetDB()
-	rows, err := db.QueryContext(ctx, "SELECT id, start_time FROM flash_sales WHERE items_sold < $1 ORDER BY start_time DESC", models.FlashSaleSize)
-	if err != nil {
-		if err := h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_query_sales"); err != nil {
-			log.Printf("Failed to store checkout attempt: %v", err)
-		}
-		http.Error(w, "Failed to query sales", http.StatusInternalServerError)
-		log.Printf("Failed to query sales: %v", err)
-		return
-	}
-	defer rows.Close()
-
 	var saleID int
-	var startTime time.Time
 	var itemFound bool
-	var foundSaleID int
 
-	for rows.Next() {
-		if err := rows.Scan(&saleID, &startTime); err != nil {
-			if err := h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_scan_sale_id"); err != nil {
-				log.Printf("Failed to store checkout attempt: %v", err)
-			}
-			http.Error(w, "Failed to scan sale ID", http.StatusInternalServerError)
-			log.Printf("Failed to scan sale ID: %v", err)
-			return
+	err = h.db.ExecuteWithRetry(ctx, func() error {
+		db := h.db.GetDB()
+		rows, err := db.QueryContext(ctx, "SELECT id, start_time FROM flash_sales WHERE items_sold < $1 ORDER BY start_time DESC", models.FlashSaleSize)
+		if err != nil {
+			return fmt.Errorf("failed to query sales: %w", err)
 		}
+		defer rows.Close()
 
 		now := time.Now().UTC()
-		if now.Before(startTime) {
-			continue
+		for rows.Next() {
+			var currentSaleID int
+			var startTime time.Time
+
+			if err := rows.Scan(&currentSaleID, &startTime); err != nil {
+				return fmt.Errorf("failed to scan sale ID: %w", err)
+			}
+
+			if now.Before(startTime) {
+				continue
+			}
+
+			var available bool
+			err = h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+				var err error
+				available, err = h.redis.ItemExists(rctx, currentSaleID, itemID)
+				return err
+			})
+
+			if err == nil && available {
+				itemFound = true
+				saleID = currentSaleID
+				return nil
+			}
 		}
 
-		available, err := h.redis.ItemExists(ctx, saleID, itemID)
-		if err == nil && available {
-			itemFound = true
-			foundSaleID = saleID
-			break
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("error iterating through sales: %w", err)
 		}
+
+		return nil
+	})
+
+	if err != nil {
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_query_sales")
+		http.Error(w, "Failed to query sales", http.StatusInternalServerError)
+		log.Printf("Failed to query sales after retries: %v", err)
+		return
 	}
 
 	if !itemFound {
-		if err := h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_item_not_found"); err != nil {
-			log.Printf("Failed to store checkout attempt: %v", err)
-		}
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_item_not_found")
 		http.Error(w, "Item not found in any active sale", http.StatusNotFound)
 		return
 	}
 
-	saleID = foundSaleID
+	err = h.db.ExecuteWithRetry(ctx, func() error {
+		return h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, saleID, "success")
+	})
 
-	if err := h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, saleID, "success"); err != nil {
+	if err != nil {
 		http.Error(w, "Failed to store checkout attempt", http.StatusInternalServerError)
-		log.Printf("Failed to store checkout attempt: %v", err)
+		log.Printf("Failed to store checkout attempt after retries: %v", err)
 		return
 	}
 
-	if err := h.redis.StoreCode(ctx, code, fmt.Sprintf("%s:%d:%d", userID, itemID, saleID), models.CodeExpirationTime); err != nil {
+	err = h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+		return h.redis.StoreCode(rctx, code, fmt.Sprintf("%s:%d:%d", userID, itemID, saleID), models.CodeExpirationTime)
+	})
+
+	if err != nil {
 		http.Error(w, "Failed to store code", http.StatusInternalServerError)
-		log.Printf("Failed to store code in Redis: %v", err)
+		log.Printf("Failed to store code in Redis after retries: %v", err)
 		return
 	}
 
@@ -147,15 +169,22 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
 
-	codeData, err := h.redis.GetCode(ctx, code)
+	var codeData string
+	err := h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+		var err error
+		codeData, err = h.redis.GetCode(rctx, code)
+		return err
+	})
+
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
+		if strings.Contains(err.Error(), "code not found or expired") {
 			http.Error(w, "Invalid or expired code", http.StatusBadRequest)
 		} else {
 			http.Error(w, "Failed to verify code", http.StatusInternalServerError)
-			log.Printf("Failed to get code from Redis: %v", err)
+			log.Printf("Failed to get code from Redis after retries: %v", err)
 		}
 		return
 	}
@@ -179,95 +208,115 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.db.GetDB()
-	tx, err := db.BeginTx(ctx, nil)
+	var purchaseSuccess bool
+
+	err = h.db.ExecuteWithRetry(ctx, func() error {
+		db := h.db.GetDB()
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{
+			Isolation: sql.LevelReadCommitted,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		var purchaseID int
+		err = tx.QueryRowContext(ctx, "SELECT id FROM purchases WHERE code = $1", code).Scan(&purchaseID)
+		if err == nil {
+			return fmt.Errorf("code has already been used")
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to check if code has been used: %w", err)
+		}
+
+		var itemsSold int
+		err = tx.QueryRowContext(ctx, "SELECT items_sold FROM flash_sales WHERE id = $1", saleID).Scan(&itemsSold)
+		if err != nil {
+			return fmt.Errorf("failed to check sale status: %w", err)
+		}
+
+		if itemsSold >= models.FlashSaleSize {
+			return fmt.Errorf("sale has reached the limit")
+		}
+
+		userTotalItems, err := h.db.GetUserTotalItems(ctx, userID, saleID)
+		if err != nil {
+			return fmt.Errorf("failed to check user items: %w", err)
+		}
+
+		if userTotalItems >= models.MaxItemsPerUser {
+			return fmt.Errorf("user has reached the maximum of %d items per sale", models.MaxItemsPerUser)
+		}
+
+		var exists bool
+		err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM items WHERE id = $1 AND sale_id = $2 AND sold = FALSE)",
+			itemID, saleID).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("failed to check if item exists: %w", err)
+		}
+
+		if !exists {
+			return fmt.Errorf("item does not exist or is already sold")
+		}
+
+		result, err := tx.ExecContext(ctx, "UPDATE items SET sold = TRUE, owner_id = $3 WHERE id = $1 AND sale_id = $2 AND sold = FALSE",
+			itemID, saleID, userID)
+		if err != nil {
+			return fmt.Errorf("failed to mark item as sold: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+
+		if rowsAffected == 0 {
+			return fmt.Errorf("item was already sold")
+		}
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO purchases (user_id, item_id, code, created_at, sale_id) VALUES ($1, $2, $3, $4, $5)",
+			userID, itemID, code, time.Now().UTC(), saleID)
+		if err != nil {
+			return fmt.Errorf("failed to record purchase: %w", err)
+		}
+
+		_, err = tx.ExecContext(ctx, "UPDATE flash_sales SET items_sold = items_sold + 1 WHERE id = $1", saleID)
+		if err != nil {
+			return fmt.Errorf("failed to update sale: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+
+		purchaseSuccess = true
+		return nil
+	})
+
 	if err != nil {
-		http.Error(w, "Failed to begin transaction", http.StatusInternalServerError)
-		log.Printf("Failed to begin transaction: %v", err)
-		return
-	}
-	defer tx.Rollback()
-
-	var purchaseID int
-	err = tx.QueryRowContext(ctx, "SELECT id FROM purchases WHERE code = $1", code).Scan(&purchaseID)
-	if err == nil {
-		http.Error(w, "Code has already been used", http.StatusConflict)
-		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, "Failed to check if code has been used", http.StatusInternalServerError)
-		log.Printf("Failed to check if code has been used: %v", err)
-		return
-	}
-
-	var itemsSold int
-	err = tx.QueryRowContext(ctx, "SELECT items_sold FROM flash_sales WHERE id = $1", saleID).Scan(&itemsSold)
-	if err != nil {
-		http.Error(w, "Failed to check sale status", http.StatusInternalServerError)
-		log.Printf("Failed to check sale status: %v", err)
+		if strings.Contains(err.Error(), "code has already been used") {
+			http.Error(w, "Code has already been used", http.StatusConflict)
+		} else if strings.Contains(err.Error(), "sale has reached the limit") {
+			http.Error(w, "Sale has reached the limit", http.StatusGone)
+		} else if strings.Contains(err.Error(), "user has reached the maximum") {
+			http.Error(w, fmt.Sprintf("User has reached the maximum of %d items per sale", models.MaxItemsPerUser), http.StatusTooManyRequests)
+		} else if strings.Contains(err.Error(), "item does not exist") || strings.Contains(err.Error(), "item was already sold") {
+			http.Error(w, "Item does not exist or is already sold", http.StatusNotFound)
+			log.Printf("Item with ID %d for sale %d does not exist or is already sold", itemID, saleID)
+		} else {
+			http.Error(w, "Failed to process purchase", http.StatusInternalServerError)
+			log.Printf("Failed to process purchase after retries: %v", err)
+		}
 		return
 	}
 
-	if itemsSold >= models.FlashSaleSize {
-		http.Error(w, "Sale has reached the limit", http.StatusGone)
-		return
-	}
+	if purchaseSuccess {
+		err = h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+			return h.redis.DeleteCode(rctx, code)
+		})
 
-	userTotalItems, err := h.db.GetUserTotalItems(ctx, userID, saleID)
-	if err != nil {
-		http.Error(w, "Failed to check user items", http.StatusInternalServerError)
-		log.Printf("Failed to check user items: %v", err)
-		return
-	}
-
-	if userTotalItems >= models.MaxItemsPerUser {
-		http.Error(w, fmt.Sprintf("User has reached the maximum of %d items per sale", models.MaxItemsPerUser), http.StatusTooManyRequests)
-		return
-	}
-
-	var exists bool
-	err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM items WHERE id = $1 AND sale_id = $2)", itemID, saleID).Scan(&exists)
-	if err != nil {
-		http.Error(w, "Failed to check if item exists", http.StatusInternalServerError)
-		log.Printf("Failed to check if item exists: %v", err)
-		return
-	}
-
-	if !exists {
-		http.Error(w, "Item does not exist", http.StatusNotFound)
-		log.Printf("Item with ID %d for sale %d does not exist", itemID, saleID)
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, "UPDATE items SET sold = TRUE, owner_id = $3 WHERE id = $1 AND sale_id = $2", itemID, saleID, userID)
-	if err != nil {
-		http.Error(w, "Failed to mark item as sold", http.StatusInternalServerError)
-		log.Printf("Failed to mark item as sold: %v", err)
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, "INSERT INTO purchases (user_id, item_id, code, created_at, sale_id) VALUES ($1, $2, $3, $4, $5)",
-		userID, itemID, code, time.Now().UTC(), saleID)
-	if err != nil {
-		http.Error(w, "Failed to record purchase", http.StatusInternalServerError)
-		log.Printf("Failed to record purchase: %v", err)
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, "UPDATE flash_sales SET items_sold = items_sold + 1 WHERE id = $1", saleID)
-	if err != nil {
-		http.Error(w, "Failed to update sale", http.StatusInternalServerError)
-		log.Printf("Failed to update sale: %v", err)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
-		log.Printf("Failed to commit transaction: %v", err)
-		return
-	}
-
-	if err := h.redis.DeleteCode(ctx, code); err != nil {
-		log.Printf("Failed to delete code from Redis: %v", err)
+		if err != nil {
+			log.Printf("Failed to delete code from Redis after retries: %v", err)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
