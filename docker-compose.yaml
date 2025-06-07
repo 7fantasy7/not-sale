@@ -1,7 +1,26 @@
-version: '3.8'
-
 services:
-  postgres:
+  app:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: not-sale-back
+    ports:
+      - "8080:8080"
+    environment:
+      RESERVATION_TIMEOUT: 3600
+      PORT: 8080
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DB: sales
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      - not_postgres
+      - not_redis
+
+  not_postgres:
     image: postgres:17.5
     ports:
       - "5432:5432"
@@ -12,14 +31,13 @@ services:
     volumes:
       - not_sale_pg:/var/lib/postgresql/data:Z
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -d notsale -U postgres" ]
+      test: [ "CMD-SHELL", "pg_isready -d app -U postgres" ]
       interval: 2s
       timeout: 3s
       retries: 10
 
-  redis:
+  not_redis:
     image: redis:latest
-    container_name: redis
     ports:
       - "6379:6379"
     volumes:
