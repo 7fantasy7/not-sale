@@ -49,8 +49,6 @@ with a two-step purchase process to ensure reliability and prevent overselling.
 - [Go-redis](https://github.com/redis/go-redis) — Redis client for Go
 - [Pgx](https://github.com/jackc/pgx) — PostgreSQL driver and toolkit for Go, best choice even it brings more deps, as lig/pq is not well supported
 
-TODO
-
 ## Building and Running
 
 ### Prerequisites
@@ -93,6 +91,8 @@ brew install k6
 ```
 #### Other platforms
 see [installation instructions](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+and [specific readme](dev/README_perf.md)
+
 
 
 ### Run the tests:
