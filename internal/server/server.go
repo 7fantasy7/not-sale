@@ -133,18 +133,6 @@ func (s *Server) startNewSale() error {
 }
 
 func (s *Server) generateItems(saleID int) error {
-	tx, err := s.db.GetDB().Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("INSERT INTO items (name, image, sale_id, sold) VALUES ($1, $2, $3, FALSE) RETURNING id")
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer stmt.Close()
-
 	categories := []string{
 		"Electronics", "Clothing", "Home", "Kitchen", "Sports",
 		"Toys", "Books", "Beauty", "Jewelry", "Automotive",
@@ -167,36 +155,45 @@ func (s *Server) generateItems(saleID int) error {
 		"Limited Edition", "Rechargeable", "Retro", "Signature", "Ultra-Thin",
 	}
 
-	ctx := context.Background()
+	itemNames := make([]string, models.FlashSaleSize)
+	itemImages := make([]string, models.FlashSaleSize)
 
 	for i := 0; i < models.FlashSaleSize; i++ {
 		categoryIndex := rand.Intn(len(categories))
 		adjectiveIndex := rand.Intn(len(adjectives))
 
-		name := fmt.Sprintf("%s %s #%d",
+		itemNames[i] = fmt.Sprintf("%s %s #%d",
 			adjectives[adjectiveIndex],
 			categories[categoryIndex],
 			i+1)
 
 		randomParam := rand.Intn(10000)
-		image := fmt.Sprintf("https://picsum.photos/200/300?random=%d-%d-%d",
+		itemImages[i] = fmt.Sprintf("https://picsum.photos/200/300?random=%d-%d-%d",
 			saleID, i+1, randomParam)
-
-		var itemID int
-		err := stmt.QueryRow(name, image, saleID).Scan(&itemID)
-		if err != nil {
-			return fmt.Errorf("failed to insert item and get ID: %w", err)
-		}
-
-		itemKey := fmt.Sprintf("item:%d:%d", saleID, itemID)
-		err = s.rdb.GetClient().Set(ctx, itemKey, "1", time.Hour).Err()
-		if err != nil {
-			log.Printf("Failed to store item in Redis: %v", err)
-		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := s.db.GenerateItems(ctx, saleID, itemNames, itemImages)
+	if err != nil {
+		return fmt.Errorf("failed to generate items: %w", err)
+	}
+
+	items, err := s.db.GetAllItems()
+	if err != nil {
+		log.Printf("Warning: failed to get items for caching: %v", err)
+		return nil
+	}
+
+	for _, item := range items {
+		if item.SaleID == saleID {
+			itemKey := fmt.Sprintf("item:%d:%d", saleID, item.ID)
+			err = s.rdb.GetClient().Set(ctx, itemKey, "1", time.Hour).Err()
+			if err != nil {
+				log.Printf("Failed to store item in Redis: %v", err)
+			}
+		}
 	}
 
 	return nil

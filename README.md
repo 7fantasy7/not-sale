@@ -47,7 +47,7 @@ with a two-step purchase process to ensure reliability and prevent overselling.
 - [Go-chi router](https://github.com/go-chi/chi/v5) - A lightweight, idiomatic and composable router for building Go
   HTTP services.
 - [Go-redis](https://github.com/redis/go-redis) — Redis client for Go
-- [Pq](https://github.com/lib/pq) — PostgreSQL driver and toolkit for Go
+- [Pgx](https://github.com/jackc/pgx) — PostgreSQL driver and toolkit for Go, best choice even it brings more deps, as lig/pq is not well supported
 
 TODO
 
@@ -77,7 +77,31 @@ docker-compose up -d --build
 
 ## Performance Testing
 
-TODO
+The project includes performance tests to evaluate the application's behavior under load. These tests focus on the checkout and purchase flow, simulating multiple concurrent users.
+
+### k6 Performance Tests
+
+Project uses [k6](https://k6.io/) for performance testing, as it allows scripting to verify real user scenarios (checkout + purchase flow)
+
+### To run the performance tests:
+
+### Install k6
+
+##### macOS
+```bash
+brew install k6
+```
+#### Other platforms
+see [installation instructions](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+
+
+### Run the tests:
+
+```bash
+K6_WEB_DASHBOARD=true K6_WEB_DASHBOARD_EXPORT=html-report.html k6 run dev/perf.js
+```
+### View the results
+Open the generated `dev/html-report.html` file in your web browser to view the performance test results.
 
 ## License
 

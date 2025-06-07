@@ -79,7 +79,7 @@ func NewConfig() *Config {
 
 		RequestTimeout:      getEnvAsDuration("REQUEST_TIMEOUT", 5*time.Second),
 		MaxConcurrentReqs:   getEnvAsInt("MAX_CONCURRENT_REQS", 1000),
-		EnableRequestLogger: getEnvAsBool("ENABLE_REQUEST_LOGGER", true),
+		EnableRequestLogger: getEnvAsBool("ENABLE_REQUEST_LOGGER", false),
 	}
 }
 
