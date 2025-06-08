@@ -297,6 +297,18 @@ func (d *Database) GetAllItems() ([]struct {
 	return items, nil
 }
 
+func (d *Database) GetSaleIDByItemID(ctx context.Context, itemID int) (int, bool, error) {
+	var saleID int
+	err := d.pool.QueryRow(ctx, "SELECT sale_id FROM items WHERE id = $1", itemID).Scan(&saleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("failed to get sale ID for item: %w", err)
+	}
+	return saleID, true, nil
+}
+
 func (d *Database) Close() error {
 	d.pool.Close()
 	return nil
@@ -339,9 +351,9 @@ func (d *Database) GetActiveSales(ctx context.Context, limit int) ([]struct {
 	return sales, nil
 }
 
-func (d *Database) BeginTx(ctx context.Context, isolationLevel string) (pgx.Tx, error) {
+func (d *Database) BeginTx(ctx context.Context) (pgx.Tx, error) {
 	return d.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.TxIsoLevel(isolationLevel),
+		IsoLevel: pgx.ReadCommitted,
 	})
 }
 

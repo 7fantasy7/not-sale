@@ -21,12 +21,13 @@ type DatabaseService interface {
 	GetUserTotalItems(ctx context.Context, userID string, saleID int) (int, error)
 	StoreCheckoutAttempt(ctx context.Context, userID string, itemID int, code string, saleID int, status string) error
 	ExecuteWithRetry(ctx context.Context, operation func() error) error
+	GetSaleIDByItemID(ctx context.Context, itemID int) (int, bool, error)
 
 	GetActiveSales(ctx context.Context, limit int) ([]struct {
 		ID        int
 		StartTime time.Time
 	}, error)
-	BeginTx(ctx context.Context, isolationLevel string) (pgx.Tx, error)
+	BeginTx(ctx context.Context) (pgx.Tx, error)
 	CheckCodeUsed(ctx context.Context, tx pgx.Tx, code string) (bool, int, error)
 	GetSaleItemsSold(ctx context.Context, tx pgx.Tx, saleID int) (int, error)
 	CheckItemAvailable(ctx context.Context, tx pgx.Tx, itemID, saleID int) (bool, error)
@@ -63,13 +64,7 @@ func (h *Handler) HandleCheckout(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var code string
-	err := h.db.ExecuteWithRetry(ctx, func() error {
-		var err error
-		code, err = utils.GenerateUniqueCode()
-		return err
-	})
-
+	code, err := utils.GenerateUniqueCode()
 	if err != nil {
 		http.Error(w, "Failed to generate code", http.StatusInternalServerError)
 		log.Printf("Failed to generate code after retries: %v", err)
@@ -90,47 +85,64 @@ func (h *Handler) HandleCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var saleID int
-	var itemFound bool
 
-	err = h.db.ExecuteWithRetry(ctx, func() error {
-		sales, err := h.db.GetActiveSales(ctx, models.FlashSaleSize)
-		if err != nil {
-			return fmt.Errorf("failed to query sales: %w", err)
-		}
-
-		now := time.Now().UTC()
-		for _, sale := range sales {
-			if now.Before(sale.StartTime) {
-				continue
-			}
-
-			var available bool
-			err = h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
-				var err error
-				available, err = h.redis.ItemExists(rctx, sale.ID, itemID)
-				return err
-			})
-
-			if err == nil && available {
-				itemFound = true
-				saleID = sale.ID
-				return nil
-			}
-		}
-
-		return nil
-	})
-
+	var found bool
+	saleID, found, err = h.db.GetSaleIDByItemID(ctx, itemID)
 	if err != nil {
-		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_query_sales")
-		http.Error(w, "Failed to query sales", http.StatusInternalServerError)
-		log.Printf("Failed to query sales after retries: %v", err)
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_query_item")
+		http.Error(w, "Failed to query item", http.StatusInternalServerError)
+		log.Printf("Failed to get sale ID for item: %v", err)
 		return
 	}
 
-	if !itemFound {
+	if !found {
 		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_item_not_found")
-		http.Error(w, "Item not found in any active sale", http.StatusNotFound)
+		http.Error(w, "Item not found", http.StatusNotFound)
+		return
+	}
+
+	var available bool
+	err = h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+		var err error
+		available, err = h.redis.ItemExists(rctx, saleID, itemID)
+		return err
+	})
+	if err != nil {
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_check_item")
+		http.Error(w, "Failed to check item availability", http.StatusInternalServerError)
+		log.Printf("Failed to check if item exists in Redis: %v", err)
+		return
+	}
+
+	if !available {
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_item_not_available")
+		http.Error(w, "Item not available", http.StatusNotFound)
+		return
+	}
+
+	var itemAvailable bool
+	err = h.db.ExecuteWithRetry(ctx, func() error {
+		tx, err := h.db.BeginTx(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		var checkErr error
+		itemAvailable, checkErr = h.db.CheckItemAvailable(ctx, tx, itemID, saleID)
+		return checkErr
+	})
+
+	if err != nil {
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_check_item_available")
+		http.Error(w, "Failed to check if item is available", http.StatusInternalServerError)
+		log.Printf("Failed to check if item is available: %v", err)
+		return
+	}
+
+	if !itemAvailable {
+		_ = h.db.StoreCheckoutAttempt(ctx, userID, itemID, code, 0, "error_item_already_sold")
+		http.Error(w, "Item is already sold", http.StatusConflict)
 		return
 	}
 
@@ -208,7 +220,7 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 	var purchaseSuccess bool
 
 	err = h.db.ExecuteWithRetry(ctx, func() error {
-		tx, err := h.db.BeginTx(ctx, "read committed")
+		tx, err := h.db.BeginTx(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}

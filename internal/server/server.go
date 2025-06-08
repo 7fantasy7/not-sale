@@ -51,9 +51,9 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(cfg.RequestTimeout))
-	r.Use(middleware.ThrottleBacklog(cfg.MaxConcurrentReqs, 1000, time.Second*60))
-	r.Use(middleware.RequestID)
+	//r.Use(middleware.Timeout(cfg.RequestTimeout))
+	//r.Use(middleware.ThrottleBacklog(cfg.MaxConcurrentReqs, 1000, time.Second*60))
+	//r.Use(middleware.RequestID)
 
 	handler := handlers.NewHandler(db, rdb)
 
@@ -221,11 +221,11 @@ func (s *Server) startHourlySales() {
 
 func (s *Server) Run() error {
 	server := &http.Server{
-		Addr:         ":" + s.config.Port,
-		Handler:      s.router,
-		ReadTimeout:  s.config.ServerReadTimeout,
-		WriteTimeout: s.config.ServerWriteTimeout,
-		IdleTimeout:  s.config.ServerIdleTimeout,
+		Addr:    ":" + s.config.Port,
+		Handler: s.router,
+		//ReadTimeout:  s.config.ServerReadTimeout,
+		//WriteTimeout: s.config.ServerWriteTimeout,
+		//IdleTimeout:  s.config.ServerIdleTimeout,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
