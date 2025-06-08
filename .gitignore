@@ -1,7 +1,5 @@
 build/
 
-dev/summary.html
-dev/summary.json
 
 # IDEA specifics
 .idea

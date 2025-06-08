@@ -2,6 +2,14 @@
 
 This directory contains performance test scripts for the Not-Sale-Back application. The tests are designed to simulate real-world usage patterns and measure the application's performance under load.
 
+## Important
+10k items is not that much to test the load in a good way, at some points it's all sold :)
+
+## Reports
+Sample (developer run) reports can be found at:
+- [HTML Report](html-report.html)
+- [Summary](summary.html)
+
 ## Prerequisites
 
 To run the performance tests, you need to have [k6](https://k6.io/) installed on your system.

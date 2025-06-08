@@ -20,21 +20,21 @@ export const options = {
   scenarios: {
     checkout_purchase_flow: {
       executor: 'ramping-vus',
-      startVUs: 1,
+      startVUs: 10,
       stages: [
-        { duration: '30s', target: 10 },  // Ramp up to 10 users over 30 seconds
-        { duration: '1m', target: 10 },   // Stay at 10 users for 1 minute
-        { duration: '30s', target: 0 },   // Ramp down to 0 users over 30 seconds
+        { duration: '10s', target: 100 },  // Ramp up to 100 users over 10 seconds
+        { duration: '30s', target: 100 },   // Stay at 100 users for 30 seconds
+        { duration: '10s', target: 0 },   // Ramp down to 0 users over 10 seconds
       ],
       gracefulRampDown: '10s',
     },
     checkout_only_flow: {
       executor: 'ramping-vus',
-      startVUs: 1,
+      startVUs: 30,
       stages: [
-        { duration: '30s', target: 5 },   // Ramp up to 5 users over 30 seconds
-        { duration: '1m', target: 5 },    // Stay at 5 users for 1 minute
-        { duration: '30s', target: 0 },   // Ramp down to 0 users over 30 seconds
+        { duration: '10s', target: 200 },   // Ramp up to 5 users over 30 seconds
+        { duration: '30s', target: 500 },    // Stay at 5 users for 1 minute
+        { duration: '10s', target: 0 },   // Ramp down to 0 users over 30 seconds
       ],
       gracefulRampDown: '10s',
       exec: 'checkoutOnlyFlow',             // Use the checkoutOnlyFlow function for this scenario
