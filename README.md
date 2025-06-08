@@ -28,6 +28,7 @@ with a two-step purchase process to ensure reliability and prevent overselling.
 - Receives a first request: `POST /checkout?user_id=%user_id%&id=%item_id%`,<br> generates a unique code for the user
   and returns the code. All checkout attempts must be persisted
 - Receives a second request: `POST /purchase?code=%code%`, verifies the code, and "sells" the item to the user
+- Provides a health endpoint at `GET /health` that checks the status of database and Redis connections
 - Ensures exactly 10,000 items are sold each sale—no over‑ or underselling
 - Limits each user to a maximum of 10 items per sale
 
@@ -61,7 +62,7 @@ with a two-step purchase process to ensure reliability and prevent overselling.
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/7fantasy7/not-sale-back.git
+git clone https://github.com/7fantasy7/not-sale.git
 cd not-sale-back
 ```
 
@@ -71,7 +72,14 @@ cd not-sale-back
 docker-compose up -d --build
 ```
 
+You should have all services up and running:<br>
+![compose.png](compose.png)
+
+The docker-compose configuration includes health checks for PostgreSQL and Redis services, and the application will only start after these dependencies are healthy.
+
 3. The service will be available at http://localhost:8080
+
+4. You can check the application health status at http://localhost:8080/health
 
 ## Performance Testing
 
@@ -91,7 +99,7 @@ brew install k6
 ```
 #### Other platforms
 see [installation instructions](https://grafana.com/docs/k6/latest/set-up/install-k6/)
-and [specific readme](dev/README_perf.md)
+and [performance-specific README](dev/README_perf.md)
 
 
 

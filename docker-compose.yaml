@@ -16,8 +16,10 @@ services:
       REDIS_HOST: not_redis
       REDIS_PORT: 6379
     depends_on:
-      - not_postgres
-      - not_redis
+      not_postgres:
+        condition: service_healthy
+      not_redis:
+        condition: service_healthy
 
   not_postgres:
     image: postgres:17.5

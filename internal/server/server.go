@@ -53,7 +53,6 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(cfg.RequestTimeout))
 	r.Use(middleware.ThrottleBacklog(cfg.MaxConcurrentReqs, 1000, time.Second*60))
-	r.Use(middleware.Heartbeat("/health"))
 	r.Use(middleware.RequestID)
 
 	handler := handlers.NewHandler(db, rdb)
@@ -81,6 +80,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 func (s *Server) setupRoutes() {
 	s.router.Post("/checkout", s.handler.HandleCheckout)
 	s.router.Post("/purchase", s.handler.HandlePurchase)
+	s.router.Get("/health", s.handler.HandleHealth)
 }
 
 func (s *Server) populateItemsCache(ctx context.Context) error {

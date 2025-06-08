@@ -306,3 +306,41 @@ func (h *Handler) HandlePurchase(w http.ResponseWriter, r *http.Request) {
 		"message": "Purchase successful",
 	})
 }
+
+func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	status := map[string]string{
+		"status":   "ok",
+		"database": "ok",
+		"redis":    "ok",
+	}
+
+	dbErr := h.db.ExecuteWithRetry(ctx, func() error {
+		_, err := h.db.GetActiveSales(ctx, 1)
+		return err
+	})
+
+	if dbErr != nil {
+		status["database"] = "error"
+		status["status"] = "error"
+		log.Printf("Health check: Database error: %v", dbErr)
+	}
+
+	redisErr := h.redis.ExecuteWithRetry(ctx, func(rctx context.Context) error {
+		return h.redis.GetClient().Ping(rctx).Err()
+	})
+
+	if redisErr != nil {
+		status["redis"] = "error"
+		status["status"] = "error"
+		log.Printf("Health check: Redis error: %v", redisErr)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if status["status"] != "ok" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	json.NewEncoder(w).Encode(status)
+}
